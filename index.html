@@ -380,7 +380,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',sa
 // ══════════════════════════════════════════════════════════
 //  ★ 設定區：把你的 Apps Script 網址貼在這裡
 // ══════════════════════════════════════════════════════════
-const GAS_URL = 'https://script.google.com/macros/s/AKfycbylbDHjojMOqM4d9lnifj9Pbjt0n-jS7XwgQVspDtibhKDtUVR-qDamgUbtbfi5lyLzKQ/exec'; // ← 貼上你的 Apps Script 部署網址
+const GAS_URL = 'https://script.google.com/macros/s/AKfycbylbDHjojMOqM4d9lnifj9Pbjt0n-jS7XwgQVspDtibhKDtUVR-qDamgUbtbfi5lyLzKQ/exec';
 // ══════════════════════════════════════════════════════════
 
 // ── 資料狀態 ──
@@ -399,40 +399,66 @@ function scheduleSave() {
   _saveTimer = setTimeout(() => doSave(), 1500);
 }
 
-// ── 實際送資料到 Google Sheets ──
+// ── 實際送資料到 Google Sheets（用 JSONP 繞過 CORS）──
 async function doSave() {
   if (!GAS_URL) return;
   showToast('儲存中...', 'saving');
   try {
-    const res = await fetch(GAS_URL, {
-      method: 'POST',
-      body: JSON.stringify({
-        action: 'save_all',
-        payload: { staff, behaviors, events, scheds, password: PASSWORD }
-      })
-    });
-    const json = await res.json();
-    if (json.ok) { _dirty = false; showToast('已儲存到雲端'); }
-    else showToast('儲存失敗：' + json.error, 'error');
+    const payload = JSON.stringify({ staff, behaviors, events, scheds, password: PASSWORD });
+    // Apps Script GET 可以帶 callback 參數做 JSONP，POST 用 no-cors 送
+    await fetchGAS('save_all', { data: payload });
+    _dirty = false;
+    showToast('已儲存到雲端');
   } catch(e) {
-    showToast('網路錯誤，請確認連線', 'error');
+    showToast('儲存失敗，請稍後再試', 'error');
   }
+}
+
+// ── 統一的 GAS 請求（JSONP 方式，完全避開 CORS）──
+function fetchGAS(action, params = {}) {
+  return new Promise((resolve, reject) => {
+    const cbName = '_gasCallback_' + Date.now();
+    const url = new URL(GAS_URL);
+    url.searchParams.set('action', action);
+    url.searchParams.set('callback', cbName);
+    Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v));
+
+    window[cbName] = (data) => {
+      delete window[cbName];
+      document.getElementById('gas-script')?.remove();
+      if (data && data.ok !== false) resolve(data);
+      else reject(new Error(data?.error || 'GAS error'));
+    };
+
+    const script = document.createElement('script');
+    script.id = 'gas-script';
+    script.src = url.toString();
+    script.onerror = () => {
+      delete window[cbName];
+      reject(new Error('script load error'));
+    };
+    setTimeout(() => {
+      if (window[cbName]) {
+        delete window[cbName];
+        reject(new Error('timeout'));
+      }
+    }, 15000);
+    document.head.appendChild(script);
+  });
 }
 
 // save() 被所有地方呼叫，統一走防抖
 function save() { scheduleSave(); }
 
-// ── 啟動：從 Google Sheets 載入資料 ──
+// ── 啟動：從 Google Sheets 載入資料（JSONP）──
 async function loadFromSheets() {
   if (!GAS_URL) {
     showLoginReady('⚠️ 尚未設定 Apps Script 網址，請先完成設定');
     return;
   }
   try {
-    const res = await fetch(`${GAS_URL}?action=load`);
-    const json = await res.json();
-    if (!json.ok) throw new Error(json.error);
-    const d = json.data;
+    const data = await fetchGAS('load');
+    const d = data.data || data;
     staff     = d.staff     || [];
     behaviors = d.behaviors || [];
     events    = d.events    || [];
@@ -440,7 +466,7 @@ async function loadFromSheets() {
     PASSWORD  = d.password  || '1234';
     showLoginReady('請輸入密碼以進入');
   } catch(e) {
-    showLoginReady('⚠️ 無法連線，請確認網址設定是否正確', true);
+    showLoginReady('⚠️ 無法連線，請確認網址或重試', true);
   }
 }
 
